@@ -57,6 +57,27 @@ Any aggressive DMCA claims or takedown notices against projects that explicitly 
 
 As derived from §512(f), if Nintendo (or an affiliated entity) knowingly materially misrepresents that a project like suyu is infringing (or circumvents TPMs) when it does not, especially if they fail to consider fair use, interoperability exemptions under §1201(f), or the fact that the emulator requires user-provided keys and does not itself contain proprietary Nintendo code, they can be made liable for any Damages against suyu.
 
+## Nextendo Network (experimental)
+
+This fork includes an opt-in Nextendo DNS redirection layer. It does not ship Nintendo
+keys, firmware, games, or account credentials.
+
+Enable it in the emulator configuration with:
+
+```ini
+[Network]
+enable_nextendo=true
+nextendo_server_ip=<Nextendo server IPv4>
+nextendo_nat_ip=<Nextendo NAT-check IPv4>
+```
+
+The same values can be supplied by the existing configuration system. Leave
+`enable_nextendo` disabled to keep normal suyu networking behaviour.
+
+Nextendo online support is being integrated incrementally; DNS redirection is the first
+layer. Authentication, TLS/SNI handling, NAT/P2P integration, and game-specific
+compatibility still require additional work.
+
 ## Building
 
 ### Dependencies
