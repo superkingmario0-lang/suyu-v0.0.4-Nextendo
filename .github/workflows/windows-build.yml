@@ -40,6 +40,33 @@ jobs:
             exit 1
           }
 
+      - name: Configure optional Nextendo client ID
+        shell: pwsh
+        env:
+          NEXTENDO_CLIENT_ID: ${{ secrets.NEXTENDO_CLIENT_ID }}
+        run: |
+          $clientId = $env:NEXTENDO_CLIENT_ID
+          if ([string]::IsNullOrEmpty($clientId)) {
+            Write-Warning "NEXTENDO_CLIENT_ID is not configured; account login will be unavailable in this artifact."
+            exit 0
+          }
+          if ($clientId -match '[\r\n]' -or $clientId.Contains('"') -or $clientId.Contains("'")) {
+            Write-Error "NEXTENDO_CLIENT_ID contains unsupported characters; refusing to generate the header."
+            exit 1
+          }
+
+          $escapedClientId = $clientId.Replace('\', '\\')
+          $header = @(
+            "namespace WebService::NextendoApi {"
+            "constexpr const char* AppClientId = `"$escapedClientId`";"
+            "}"
+          ) -join "`n"
+          [System.IO.File]::WriteAllText(
+            "src/web_service/nextendo_secrets.h",
+            "$header`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
       - name: Configure (MSVC / Visual Studio 2026)
         shell: pwsh
         run: |

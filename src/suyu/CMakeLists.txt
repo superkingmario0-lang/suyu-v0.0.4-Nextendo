@@ -177,6 +177,8 @@ add_executable(suyu
     game_list_p.h
     game_list_worker.cpp
     game_list_worker.h
+    nextendo_online_counts.cpp
+    nextendo_online_counts.h
     hotkeys.cpp
     hotkeys.h
     install_dialog.cpp
@@ -191,6 +193,8 @@ add_executable(suyu
     migration_dialog.h
     migration_worker.cpp
     migration_worker.h
+    nextendo_account_dialog.cpp
+    nextendo_account_dialog.h
     multiplayer/chat_room.cpp
     multiplayer/chat_room.h
     multiplayer/chat_room.ui
@@ -290,6 +294,10 @@ add_executable(suyu
     suyu.rc
 )
 
+
+if (NOT ENABLE_WEB_SERVICE)
+    target_sources(suyu PRIVATE nextendo_api_stub.cpp)
+endif()
 if (SUYU_CRASH_DUMPS)
     target_sources(suyu PRIVATE
         breakpad.cpp

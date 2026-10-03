@@ -6,11 +6,29 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <mutex>
+#include <span>
+#include <string>
+#include <vector>
+
+#include <fmt/format.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/rsa.h>
 
 #include "common/common_types.h"
+#include "common/hex_util.h"
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/nextendo_account.h"
+#include "common/nextendo_compatible_titles.h"
 #include <ranges>
 #include "common/stb.h"
 #include "common/string_util.h"
@@ -34,6 +52,226 @@
 #include "core/loader/loader.h"
 
 namespace Service::Account {
+
+namespace {
+
+constexpr std::string_view BaasIssuer =
+    "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+constexpr std::string_view BaasJku =
+    "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates";
+constexpr std::string_view BaasAudience = "ed9e2f05d286f7b8";
+constexpr std::string_view BaasKeyId = "nextendo-baas-key-1";
+
+std::string Base64UrlEncode(std::span<const u8> data) {
+    static constexpr std::string_view alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string result;
+    result.reserve((data.size() + 2) / 3 * 4);
+    for (std::size_t index = 0; index < data.size(); index += 3) {
+        const std::size_t remaining = data.size() - index;
+        const u32 triple = (static_cast<u32>(data[index]) << 16) |
+                           (remaining > 1 ? static_cast<u32>(data[index + 1]) << 8 : 0) |
+                           (remaining > 2 ? static_cast<u32>(data[index + 2]) : 0);
+        result += alphabet[(triple >> 18) & 0x3f];
+        result += alphabet[(triple >> 12) & 0x3f];
+        if (remaining > 1) {
+            result += alphabet[(triple >> 6) & 0x3f];
+        }
+        if (remaining > 2) {
+            result += alphabet[triple & 0x3f];
+        }
+    }
+    return result;
+}
+
+std::string Base64UrlEncode(std::string_view value) {
+    return Base64UrlEncode(std::span{reinterpret_cast<const u8*>(value.data()), value.size()});
+}
+
+std::string RandomHex(std::size_t byte_count) {
+    std::vector<u8> bytes(byte_count);
+    if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
+        return {};
+    }
+    return Common::HexToString(bytes, false);
+}
+
+std::string GetInstalledTitleVersion(Core::System& system) {
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    if (program_id == 0) {
+        return {};
+    }
+    const FileSys::PatchManager patch_manager{program_id, system.GetFileSystemController(),
+                                              system.GetContentProvider()};
+    const auto metadata = patch_manager.GetControlMetadata();
+    return metadata.first ? metadata.first->GetVersionString() : std::string{};
+}
+
+EVP_PKEY* GetBaasSigningKey() {
+    static EVP_PKEY* key = []() -> EVP_PKEY* {
+        std::string pem;
+        if (const char* environment_key = std::getenv("NEXTENDO_BAAS_SIGNING_KEY");
+            environment_key && *environment_key) {
+            pem = environment_key;
+            for (std::size_t newline = pem.find("\\n"); newline != std::string::npos;
+                 newline = pem.find("\\n", newline + 1)) {
+                pem.replace(newline, 2, "\n");
+            }
+        } else {
+            pem = Common::FS::ReadStringFromFile(
+                Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir) / "nextendo_baas.pem",
+                Common::FS::FileType::TextFile);
+        }
+
+        if (pem.find("BEGIN") != std::string::npos) {
+            BIO* input = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+            EVP_PKEY* supplied = input ? PEM_read_bio_PrivateKey(input, nullptr, nullptr, nullptr)
+                                       : nullptr;
+            BIO_free(input);
+            if (supplied) {
+                return supplied;
+            }
+            LOG_ERROR(Service_ACC, "Nextendo BAAS signing key could not be parsed");
+            return nullptr;
+        }
+
+        const auto key_path =
+            Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir) / "nextendo_baas_auto.pem";
+        const std::string existing =
+            Common::FS::ReadStringFromFile(key_path, Common::FS::FileType::TextFile);
+        if (existing.find("BEGIN") != std::string::npos) {
+            BIO* input = BIO_new_mem_buf(existing.data(), static_cast<int>(existing.size()));
+            EVP_PKEY* persisted =
+                input ? PEM_read_bio_PrivateKey(input, nullptr, nullptr, nullptr) : nullptr;
+            BIO_free(input);
+            if (persisted) {
+                return persisted;
+            }
+        }
+
+        EVP_PKEY_CTX* context = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+        EVP_PKEY* generated = nullptr;
+        if (!context || EVP_PKEY_keygen_init(context) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_keygen_bits(context, 2048) <= 0 ||
+            EVP_PKEY_keygen(context, &generated) <= 0) {
+            EVP_PKEY_CTX_free(context);
+            EVP_PKEY_free(generated);
+            LOG_ERROR(Service_ACC, "Could not generate a Nextendo BAAS signing key");
+            return nullptr;
+        }
+        EVP_PKEY_CTX_free(context);
+
+        BIO* output = BIO_new(BIO_s_mem());
+        if (output && PEM_write_bio_PrivateKey(output, generated, nullptr, nullptr, 0, nullptr,
+                                               nullptr)) {
+            char* data = nullptr;
+            const long length = BIO_get_mem_data(output, &data);
+            if (length > 0 && data) {
+                const auto path = Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir) /
+                                  "nextendo_baas_auto.pem";
+                void(Common::FS::CreateParentDirs(path));
+                void(Common::FS::WriteStringToFile(
+                    path, Common::FS::FileType::TextFile,
+                    std::string_view{data, static_cast<std::size_t>(length)}));
+#ifndef _WIN32
+                std::error_code error;
+                std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                                        std::filesystem::perms::owner_write,
+                                             std::filesystem::perm_options::replace, error);
+#endif
+            }
+        }
+        BIO_free(output);
+        return generated;
+    }();
+    return key;
+}
+
+std::string SignBaasToken(std::string_view signing_input) {
+    EVP_PKEY* key = GetBaasSigningKey();
+    EVP_MD_CTX* context = key ? EVP_MD_CTX_new() : nullptr;
+    if (!context) {
+        return {};
+    }
+
+    std::size_t signature_size{};
+    std::string signature;
+    const auto* input = reinterpret_cast<const u8*>(signing_input.data());
+    if (EVP_DigestSignInit(context, nullptr, EVP_sha256(), nullptr, key) == 1 &&
+        EVP_DigestSign(context, nullptr, &signature_size, input, signing_input.size()) == 1) {
+        std::vector<u8> bytes(signature_size);
+        if (EVP_DigestSign(context, bytes.data(), &signature_size, input, signing_input.size()) ==
+            1) {
+            bytes.resize(signature_size);
+            signature = Base64UrlEncode(bytes);
+        }
+    }
+    EVP_MD_CTX_free(context);
+    return signature;
+}
+
+std::string BuildBaasToken(Core::System& system, const std::string& nex_token) {
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    const std::string version = GetInstalledTitleVersion(system);
+
+    const std::string device_id = RandomHex(16);
+    const std::string subject = RandomHex(16);
+    const std::string token_id = Common::UUID::MakeRandom().FormattedString();
+    if (device_id.empty() || subject.empty()) {
+        return {};
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const std::string header = fmt::format(
+        R"({{"alg":"RS256","kid":"{}","typ":"id_token","jku":"{}"}})", BaasKeyId,
+        BaasJku);
+    const std::string nintendo_claim = fmt::format(
+        R"("nintendo":{{"dt":"NX Prod 1","pc":"HAC","di":"{}","sn":"XAW10000000000","ist":false}},)",
+        device_id);
+    std::string version_claim;
+    if (!version.empty()) {
+        version_claim = fmt::format(R"("tv":"{}",)", version);
+    }
+    if (program_id == 0x0100A3D008C5C000ULL) {
+        version_claim += fmt::format(R"("app_id":"{:016X}",)", program_id);
+    }
+    const std::string account_claim =
+        nex_token.empty() ? std::string{} : fmt::format(R"("nnex":"{}",)", nex_token);
+    const std::string payload = fmt::format(
+        R"({{"sub":"{}","aud":"{}","iss":"{}","typ":"id_token","iat":{},"exp":{},"jku":"{}","jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}",{}{}{}"hm":true}})",
+        subject, BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku, token_id, device_id,
+        RandomHex(16), nintendo_claim, account_claim, version_claim);
+    const std::string signing_input =
+        Base64UrlEncode(header) + "." + Base64UrlEncode(payload);
+    const std::string signature = SignBaasToken(signing_input);
+    return signature.empty() ? std::string{} : signing_input + "." + signature;
+}
+
+std::vector<u8> GetBaasTokenBytes(Core::System& system) {
+    static std::mutex mutex;
+    static std::vector<u8> cached;
+    static std::chrono::steady_clock::time_point expiry{};
+    static std::string cached_nex_token;
+    static u64 cached_program_id{};
+
+    std::lock_guard lock{mutex};
+    const std::string nex_token = Common::NextendoAccount::GetToken();
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    const auto now = std::chrono::steady_clock::now();
+    if (cached.empty() || now >= expiry || nex_token != cached_nex_token ||
+        program_id != cached_program_id) {
+        const std::string token = BuildBaasToken(system, nex_token);
+        cached.assign(token.begin(), token.end());
+        expiry = now + std::chrono::hours{2};
+        cached_nex_token = nex_token;
+        cached_program_id = program_id;
+    }
+    return cached;
+}
+
+} // namespace
 
 // Thumbnails are hard coded to be at least this size
 constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
@@ -349,6 +587,22 @@ public:
     }
 };
 
+static void ApplyNextendoUsername(Common::UUID user_id, ProfileManager& profile_manager,
+                                  ProfileBase& profile_base) {
+    if (user_id != profile_manager.GetLastOpenedUser()) {
+        return;
+    }
+    const std::string username = Common::NextendoAccount::GetUsername();
+    if (username.empty()) {
+        return;
+    }
+    profile_base.username.fill(0);
+    const std::size_t length = std::min(username.size(), profile_base.username.size() - 1);
+    for (std::size_t index = 0; index < length; ++index) {
+        profile_base.username[index] = static_cast<u8>(username[index]);
+    }
+}
+
 class IProfileCommon : public ServiceFramework<IProfileCommon> {
 public:
     explicit IProfileCommon(Core::System& system_, const char* name, bool editor_commands,
@@ -426,6 +680,7 @@ protected:
         ProfileBase profile_base{};
         UserData data{};
         if (profile_manager.GetProfileBaseAndData(user_id, profile_base, data)) {
+            ApplyNextendoUsername(user_id, profile_manager, profile_base);
             ctx.WriteBuffer(data);
             IPC::ResponseBuilder rb{ctx, 16};
             rb.Push(ResultSuccess);
@@ -442,6 +697,7 @@ protected:
         LOG_DEBUG(Service_ACC, "called user_id=0x{}", user_id.RawString());
         ProfileBase profile_base{};
         if (profile_manager.GetProfileBase(user_id, profile_base)) {
+            ApplyNextendoUsername(user_id, profile_manager, profile_base);
             IPC::ResponseBuilder rb{ctx, 16};
             rb.Push(ResultSuccess);
             rb.PushRaw(profile_base);
@@ -659,17 +915,19 @@ public:
 
 class EnsureTokenIdCacheAsyncInterface final : public IAsyncContext {
 public:
-    explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_) : IAsyncContext{system_} {
+    explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_)
+        : IAsyncContext{system_}, system{system_} {
         MarkComplete();
     }
     ~EnsureTokenIdCacheAsyncInterface() = default;
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        const std::vector<u8> token_bytes = GetBaasTokenBytes(system);
+        ctx.WriteBuffer(token_bytes);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(0);
+        rb.Push<u32>(static_cast<u32>(token_bytes.size()));
     }
 
 protected:
@@ -682,6 +940,9 @@ protected:
     Result GetResult() const override {
         return ResultSuccess;
     }
+
+private:
+    Core::System& system;
 };
 
 class IManagerForApplication final : public ServiceFramework<IManagerForApplication> {
@@ -710,6 +971,26 @@ public:
     }
 
 private:
+    u64 GetEffectivePid() const {
+        const u64 linked_pid = Common::NextendoAccount::GetPid();
+        if (linked_pid == 0) {
+            return profile_manager->GetLastOpenedUser().Hash();
+        }
+
+        const u64 program_id = system.GetApplicationProcessProgramID();
+        const auto title = Nextendo::CompatibleTitles::Table().find(program_id);
+        if (title != Nextendo::CompatibleTitles::Table().end()) {
+            const std::string installed_version = GetInstalledTitleVersion(system);
+            if (!installed_version.empty() && installed_version != title->second.version) {
+                LOG_WARNING(Service_ACC,
+                            "[Nextendo] Refusing online PID because the installed title version "
+                            "is incompatible with this server");
+                return 0xcafe;
+            }
+        }
+        return linked_pid;
+    }
+
     void CheckAvailability(HLERequestContext& ctx) {
         LOG_DEBUG(Service_ACC, "(STUBBED) called");
         IPC::ResponseBuilder rb{ctx, 2};
@@ -717,11 +998,12 @@ private:
     }
 
     void GetAccountId(HLERequestContext& ctx) {
+        const u64 account_id = GetEffectivePid();
         LOG_DEBUG(Service_ACC, "called");
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(account_id);
     }
 
     void EnsureIdTokenCacheAsync(HLERequestContext& ctx) {
@@ -739,22 +1021,18 @@ private:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
-
-        std::vector<u8> token_data(0x100);
-        std::fill(token_data.begin(), token_data.end(), u8(0));
-
-        ctx.WriteBuffer(token_data);
+        const std::vector<u8> token_bytes = GetBaasTokenBytes(system);
+        ctx.WriteBuffer(token_bytes);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(static_cast<u32>(token_data.size()));
+        rb.Push(static_cast<u32>(token_bytes.size()));
     }
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
-
-        std::vector<u8> nas_user_base_for_application(0x68);
+        const u64 account_id = GetEffectivePid();
+        std::vector<u8> nas_user_base_for_application(0x68, 0);
+        std::memcpy(nas_user_base_for_application.data(), &account_id, sizeof(account_id));
         ctx.WriteBuffer(nas_user_base_for_application);
 
         if (ctx.CanWriteBuffer(1)) {
@@ -764,7 +1042,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(account_id);
     }
 
     void StoreOpenContext(HLERequestContext& ctx) {

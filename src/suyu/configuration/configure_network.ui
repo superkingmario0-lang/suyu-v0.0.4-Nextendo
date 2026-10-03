@@ -55,6 +55,76 @@
        </layout>
       </widget>
      </item>
+     <item>
+      <widget class="QGroupBox" name="nextendo_group">
+       <property name="title">
+        <string>Nextendo Network Integration</string>
+       </property>
+       <layout class="QGridLayout" name="nextendo_layout">
+        <item row="0" column="0" colspan="2">
+         <widget class="QCheckBox" name="enable_nextendo">
+          <property name="toolTip">
+           <string>Redirect Nintendo online-service DNS requests to the configured Nextendo servers.</string>
+          </property>
+          <property name="text">
+           <string>Redirect online game services to Nextendo</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="label_nextendo_server_ip">
+          <property name="text">
+           <string>Service Server IP</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QLineEdit" name="nextendo_server_ip">
+          <property name="placeholderText">
+           <string>IPv4 or IPv6 address</string>
+          </property>
+          <property name="toolTip">
+           <string>Address used for Nextendo online services. Get the current address from your Nextendo network operator.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="label_nextendo_nat_ip">
+          <property name="text">
+           <string>NAT Check IP</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="QLineEdit" name="nextendo_nat_ip">
+          <property name="placeholderText">
+           <string>IPv4 or IPv6 address</string>
+          </property>
+          <property name="toolTip">
+           <string>Separate Nextendo NAT-check server address, when provided by your network operator.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="0" colspan="2">
+         <widget class="QPushButton" name="open_nextendo_account">
+          <property name="text">
+           <string>Nextendo account, friends, and population...</string>
+          </property>
+         </widget>
+        </item>
+        <item row="4" column="0" colspan="2">
+         <widget class="QLabel" name="nextendo_key_note">
+          <property name="wordWrap">
+           <bool>true</bool>
+          </property>
+          <property name="text">
+           <string>Game authentication also requires a Nextendo BAAS signing key in the keys folder as nextendo_baas.pem, or the NEXTENDO_BAAS_SIGNING_KEY environment variable.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
     </layout>
    </item>
    <item>

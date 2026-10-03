@@ -84,8 +84,11 @@ add_library(
     math_util.h
     memory_detect.cpp
     memory_detect.h
+    nextendo_account.cpp
+    nextendo_account.h
     multi_level_page_table.cpp
     multi_level_page_table.h
+    nextendo_compatible_titles.h
     overflow.h
     page_table.cpp
     page_table.h

@@ -24,6 +24,7 @@
 #include "common/common_types.h"
 #include "common/logging/log.h"
 #include "common/string_util.h"
+#include "suyu/nextendo_online_counts.h"
 #include "suyu/play_time_manager.h"
 #include "suyu/uisettings.h"
 #include "suyu/util/util.h"
@@ -148,6 +149,30 @@ public:
     }
 
     QVariant data(int role) const override {
+        if (role == Qt::DecorationRole) {
+            QPixmap icon = GameListItem::data(role).value<QPixmap>();
+            const auto count = Nextendo::OnlineCounts::For(data(ProgramIdRole).toULongLong());
+            if (count && !icon.isNull()) {
+                const qreal dpr = icon.devicePixelRatio();
+                const qreal width = icon.width() / dpr;
+                const qreal height = icon.height() / dpr;
+                const QRectF badge(width - 43, 3, 40, 21);
+                QPainter painter(&icon);
+                painter.setRenderHint(QPainter::Antialiasing, true);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(18, 128, 94, 238));
+                painter.drawRoundedRect(badge, 9, 9);
+                QFont font = painter.font();
+                font.setBold(true);
+                font.setPointSize(8);
+                painter.setFont(font);
+                painter.setPen(Qt::white);
+                painter.drawText(badge, Qt::AlignCenter,
+                                 *count > 99 ? QStringLiteral("99+") : QString::number(*count));
+            }
+            return icon;
+        }
+
         if (role == Qt::DisplayRole || role == SortRole) {
             std::string filename;
             Common::SplitPath(data(FullPathRole).toString().toStdString(), nullptr, &filename,

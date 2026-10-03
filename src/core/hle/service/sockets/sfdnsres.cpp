@@ -122,10 +122,12 @@ static std::optional<std::string> ReplacementHostFor(const std::string& host) {
         const std::string& nat_ip = Settings::values.nextendo_nat_ip.GetValue();
         const std::string& server_ip = Settings::values.nextendo_server_ip.GetValue();
 
-        if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net") &&
-            !nat_ip.empty()) {
-            LOG_INFO(Network, "[Nextendo] Redirecting NAT host {} -> {}", host, nat_ip);
-            return nat_ip;
+        if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net")) {
+            if (!nat_ip.empty()) {
+                LOG_INFO(Network, "[Nextendo] Redirecting NAT host {} -> {}", host, nat_ip);
+                return nat_ip;
+            }
+            return std::nullopt;
         }
 
         if (!server_ip.empty()) {

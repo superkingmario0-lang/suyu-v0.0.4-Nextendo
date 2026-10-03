@@ -43,6 +43,7 @@
 #include "applets/qt_profile_select.h"
 #include "applets/qt_software_keyboard.h"
 #include "applets/qt_web_browser.h"
+#include "common/nextendo_account.h"
 #include "common/nvidia_flags.h"
 #include "common/settings_enums.h"
 #include "configuration/configure_input.h"
@@ -63,6 +64,8 @@
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
 #include "suyu/multiplayer/state.h"
+#include "suyu/nextendo_account_dialog.h"
+#include "suyu/nextendo_online_counts.h"
 #include "suyu/util/controller_navigation.h"
 
 // These are wrappers to avoid the calls to CreateDirectory and CreateFile because of the Windows
@@ -152,6 +155,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/loader/loader.h"
+#include "web_service/nextendo_api.h"
 #include "core/perf_stats.h"
 #include "frontend_common/config.h"
 #include "input_common/drivers/tas_input.h"
@@ -438,6 +442,44 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
     RegisterMetaTypes();
 
     InitializeWidgets();
+    Nextendo::OnlineCounts::Start(this, [this] {
+        if (game_list) {
+            game_list->RefreshOnlineIndicators();
+        }
+    });
+    connect(this, &GMainWindow::EmulationStarting, this, [this](EmuThread*) {
+        if (!Common::NextendoAccount::IsLinked()) {
+            return;
+        }
+        const std::string app_id =
+            fmt::format("{:016X}", system->GetApplicationProcessProgramID());
+        const std::string app_name = QFileInfo(current_game_path).completeBaseName().toStdString();
+        QtConcurrent::run([app_id, app_name] {
+            WebService::NextendoApi::PushPresence(2, app_id, app_name);
+        });
+    });
+    connect(this, &GMainWindow::EmulationStopping, this, [this] {
+        if (Common::NextendoAccount::IsLinked()) {
+            QtConcurrent::run([] { WebService::NextendoApi::PushPresence(1); });
+        }
+    });
+    auto* nextendo_presence_timer = new QTimer(this);
+    nextendo_presence_timer->setInterval(20'000);
+    connect(nextendo_presence_timer, &QTimer::timeout, this, [this] {
+        if (!Common::NextendoAccount::IsLinked()) {
+            return;
+        }
+        const bool in_game = emulation_running;
+        const std::string app_id =
+            in_game ? fmt::format("{:016X}", system->GetApplicationProcessProgramID())
+                    : std::string{};
+        const std::string app_name =
+            in_game ? QFileInfo(current_game_path).completeBaseName().toStdString() : std::string{};
+        QtConcurrent::run([in_game, app_id, app_name] {
+            WebService::NextendoApi::PushPresence(in_game ? 2 : 1, app_id, app_name);
+        });
+    });
+    nextendo_presence_timer->start();
     InitializeDebugWidgets();
     InitializeRecentFileMenuActions();
     InitializeHotkeys();
@@ -1743,6 +1785,22 @@ void GMainWindow::ConnectMenuEvents() {
         // Add actions to the render window so that they work outside of single window mode
         render_window->addAction(action);
     };
+
+    auto* nextendo_menu = menuBar()->addMenu(tr("Nextendo"));
+    auto* nextendo_account_action = new QAction(tr("Account, Friends & Population..."), this);
+    nextendo_menu->addAction(nextendo_account_action);
+    connect_menu(nextendo_account_action, [this] {
+        auto* dialog = new NextendoAccountDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        connect(dialog, &QDialog::finished, this, [this] {
+            if (game_list) {
+                game_list->RefreshOnlineIndicators();
+            }
+        });
+        dialog->show();
+        dialog->raise();
+        dialog->activateWindow();
+    });
 
     // File
     connect_menu(ui->action_Load_File, &GMainWindow::OnMenuLoadFile);

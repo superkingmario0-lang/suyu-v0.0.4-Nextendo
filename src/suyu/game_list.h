@@ -108,6 +108,7 @@ public:
     void LoadInterfaceLayout();
 
     QStandardItemModel* GetModel() const;
+    void RefreshOnlineIndicators();
 
     /// Disables events from the emulated controller
     void UnloadController();

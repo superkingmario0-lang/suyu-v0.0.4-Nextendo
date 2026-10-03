@@ -980,6 +980,10 @@ QStandardItemModel* GameList::GetModel() const {
     return item_model;
 }
 
+void GameList::RefreshOnlineIndicators() {
+    tree_view->viewport()->update();
+}
+
 void GameList::PopulateAsync(QVector<UISettings::GameDir>& game_dirs) {
     tree_view->setEnabled(false);
 

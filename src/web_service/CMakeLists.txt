@@ -7,6 +7,8 @@
 add_library(web_service STATIC
     announce_room_json.cpp
     announce_room_json.h
+    nextendo_api.cpp
+    nextendo_api.h
     verify_login.cpp
     verify_login.h
     verify_user_jwt.cpp
