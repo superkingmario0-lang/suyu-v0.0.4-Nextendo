@@ -25,6 +25,7 @@
 #include "common/common_types.h"
 #include "common/hex_util.h"
 #include "common/fs/file.h"
+#include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/nextendo_account.h"
